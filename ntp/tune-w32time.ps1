@@ -1,23 +1,42 @@
-# ntp-advanced.ps1 - fallback for machines that cannot run the NTP daemon.
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, LevyLab
 #
-# Tunes Windows' built-in w32time for high accuracy against the lab time server.
-# Expect ~1-2 ms rather than the ~50 us install-lab-ntp.ps1 achieves.
+# tune-w32time.ps1 - FALLBACK ONLY, for machines that cannot run the NTP daemon.
+#
+# Prefer install-lab-ntp.ps1. This script is the worse option, kept for machines
+# where installing a daemon is not permitted: it tunes Windows' built-in w32time
+# for the best accuracy it can reach, ~1-2 ms rather than the ~50 us that
+# install-lab-ntp.ps1 achieves.
 #
 # The big caveat, and the reason this is the fallback: w32time has no driftfile.
 # It relearns the clock's frequency error from scratch on every boot, taking
 # ~30-60 min to reconverge each time. See NOTES.md.
 #
+# Refuses to run on a machine that already has the Meinberg ntp service, since
+# that machine is already on the better path and re-enabling w32time beside ntpd
+# would leave two daemons fighting over one clock. -Force performs the migration
+# back to w32time properly instead, by taking ntpd out first.
+#
 # Usage (elevated):
-#   .\ntp-advanced.ps1
-#   .\ntp-advanced.ps1 -NtpServer 10.0.0.50 -NoStep
+#   .\tune-w32time.ps1
+#   .\tune-w32time.ps1 -NtpServer 10.0.0.50 -NoStep
+#   .\tune-w32time.ps1 -Force        # deliberately migrate a machine off ntpd
+#
+# Exit codes (shared with install-lab-ntp.ps1):
+#   0 success                     4 server not answering NTP
+#   2 elevation problem           5 install or configuration failure
+#   3 cannot resolve server       8 refused: wrong script for this machine
 
 param(
     [string]$NtpServer = 'levylab-ntp.phyast.pitt.edu',
     [switch]$NoStep,          # skip the one-time hard step (machines mid-acquisition)
+    [switch]$Force,           # migrate a machine off ntpd back to w32time
     [string]$LogPath
 )
 
-if (-not $LogPath) { $LogPath = Join-Path $PSScriptRoot 'ntp-advanced.log' }
+# Not $PSScriptRoot: that drops a log into the repo working tree on every run
+# from a clone. The path is echoed at the end so it is still easy to find.
+if (-not $LogPath) { $LogPath = Join-Path $env:TEMP 'tune-w32time.log' }
 
 $cfgKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config'
 $ntpKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpClient'
@@ -31,12 +50,39 @@ function Log {
     Add-Content -Path $LogPath -Value $line -Encoding utf8
 }
 
-Log "=== ntp-advanced run, target $NtpServer ==="
+Log "=== tune-w32time run, target $NtpServer ==="
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     Log 'FAILED: must be run elevated (Run as Administrator). Nothing changed.'
     exit 2
+}
+
+# --- guard: is this even the right script for this machine? ---
+# install-lab-ntp.ps1 disables w32time deliberately. Turning w32time back on
+# while ntpd is still there leaves two daemons disciplining one clock, which is
+# worse than either alone and awkward to diagnose: each reports itself healthy.
+# The boundary between the two scripts is enforced here rather than left to the
+# README, because the mistake is easy to make when working down a list of PCs.
+$ntpdSvc = Get-Service ntp -ErrorAction SilentlyContinue
+if ($ntpdSvc) {
+    if (-not $Force) {
+        Log "REFUSED: the Meinberg ntp service is present here (status $($ntpdSvc.Status))."
+        Log '  That means this machine was set up with install-lab-ntp.ps1, which is the'
+        Log '  better path (~50 us, and it survives reboots). Running this script would'
+        Log '  re-enable w32time alongside ntpd. Nothing has been changed.'
+        Log '  If ntpd is unhealthy, repair it or re-run install-lab-ntp.ps1 instead.'
+        Log '  To deliberately move this machine back to w32time, re-run with -Force,'
+        Log '  which stops and disables ntpd first.'
+        exit 8
+    }
+    # -Force means "migrate properly", not "ignore the hazard": ntpd comes out
+    # before w32time goes on, so the two-daemon state never exists at all.
+    Log "-Force given: taking ntpd out of service first (was $($ntpdSvc.Status))."
+    if ($ntpdSvc.Status -eq 'Running') { Stop-Service ntp -Force }
+    Set-Service ntp -StartupType Disabled
+    Log '  ntp service stopped and set to Disabled. The Meinberg installation itself is'
+    Log '  left in place; remove it from Apps & Features if you want it gone entirely.'
 }
 
 try { $ip = ([Net.Dns]::GetHostAddresses($NtpServer) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1).IPAddressToString }
@@ -117,4 +163,5 @@ Log (& w32tm.exe /resync 2>&1 | Out-String)
 Start-Sleep -Seconds 2
 Log "---- status ----`n$(& w32tm.exe /query /status 2>&1 | Out-String)"
 Log "---- config ----`n$(& w32tm.exe /query /configuration 2>&1 | Out-String)"
-Log 'DONE. Reboot when convenient (Secure Time Seeding needs it), then verify with Test-LabTime.ps1.'
+Log 'DONE. Reboot when convenient (Secure Time Seeding needs it), then verify with test-lab-ntp.ps1.'
+Log "Log written to $LogPath"

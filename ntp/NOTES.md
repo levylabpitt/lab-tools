@@ -30,7 +30,9 @@ The applied correction crept 35.5 → 35.7 ppm over 18 hours. That is temperatur
 
 **Short measurement windows produce confident nonsense.** At 35 ppm the clock moves only ~0.5 ms in 14 seconds, well below the jitter on a typical network path. Early attempts to measure drift gave 44 ppm, then 40 ppm, and one run produced the wrong *sign* entirely (-5.65 ppm). The true value was 35.4.
 
-`Test-LabTime.ps1` therefore computes the standard error of the regression slope and of the mean offset, reports both, and **will not fail a clock on a difference smaller than the measurement can resolve.** Two sigma is the margin.
+`test-lab-ntp.ps1` therefore computes the standard error of the regression slope and of the mean offset, reports both, and **will not fail a clock on a difference smaller than the measurement can resolve.** Two sigma is the margin.
+
+The same principle governs a run that resolves nothing at all. A window too short to separate drift from network jitter is a fact about the measurement, not about the clock, so `Drift Quality` of `Poor` or `Insufficient` lands in `Notes` and leaves `Result` alone. Only `Issues` decides PASS/FAIL. An earlier version failed on it, which meant a noisy path or a short run condemned a healthy machine - the identical error the two-sigma margins were added to prevent, arriving through a different door.
 
 This matters in both directions. An early version failed a healthy machine on an offset of 1.21 ms against a 1.00 ms threshold while its own sample spread was 7.2 ms - crying wolf on 0.2 ms it could not actually see.
 
@@ -44,7 +46,7 @@ Sampling every 2 s can trip an NTP server's rate limiting. Symptoms are dropped 
 
 Windows estimates time from TLS handshakes as a fallback for a grossly wrong clock, enabled by default since Windows 10 1511. The feature reads a handshake field that many modern TLS stacks fill with **random bytes**, and has produced [documented corrections wrong by days, weeks, or years](https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/sts-recommendations-for-windows-server).
 
-Microsoft now ships Windows Server 2025 with it off. `ntp-advanced.ps1` sets `UtilizeSslTimeData = 0`; the change needs a reboot to take effect. Installing ntpd disables w32time entirely, so the question does not arise.
+Microsoft now ships Windows Server 2025 with it off. `tune-w32time.ps1` sets `UtilizeSslTimeData = 0`; the change needs a reboot to take effect. Installing ntpd disables w32time entirely, so the question does not arise.
 
 One machine here returned from a 6.3-day power-off **12.3 days behind** - roughly double the downtime, which RTC drift cannot explain. Never proven, but it fits.
 

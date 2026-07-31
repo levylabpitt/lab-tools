@@ -1,0 +1,7 @@
+# Run logs from tune-w32time.ps1 and install-lab-ntp.ps1.
+*.log
+*.transcript.txt
+
+# install-lab-ntp.ps1 uses the Meinberg installer from beside itself if present.
+# Keep that local copy out of the repo - it is pinned by SHA-256 in the script.
+*.exe

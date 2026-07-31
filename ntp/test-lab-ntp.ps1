@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, LevyLab
+
 <#
 .SYNOPSIS
     Independent health check for lab timekeeping. Works whether the machine runs
@@ -22,6 +25,12 @@
     own uncertainty and neither is failed on a difference the measurement cannot
     actually resolve.
 
+    Result is PASS or FAIL, and is decided by Issues alone. Anything the run
+    could not determine goes to Notes instead, which does not affect the
+    verdict: a measurement that failed to resolve drift is not evidence of a bad
+    clock, and grading it as one would be the same mistake the uncertainty
+    margins exist to avoid.
+
 .PARAMETER NtpServer
     Reference to measure against. Defaults to the lab GPS appliance.
 
@@ -30,9 +39,11 @@
     offset, hiding that it is not using the lab source at all.
 
 .PARAMETER Samples
-    Number of measurements. With the default 8 s period, 60 samples takes 8
-    minutes and resolves drift to about 1 ppm. Fewer samples measures offset
-    fine but cannot resolve drift - watch 'Drift Quality'.
+    Number of measurements. Default 30, which at the default 8 s period takes 4
+    minutes and measures offset well. Drift needs a longer window: 60 samples
+    takes 8 minutes and resolves drift to about 1 ppm. Watch 'Drift Quality' to
+    see whether the run resolved it - if it did not, that appears in Notes and
+    does not fail the machine.
 
 .PARAMETER PeriodSeconds
     Seconds between samples. Default 8. Polling faster than this can trip an NTP
@@ -44,15 +55,21 @@
 .PARAMETER ToleranceMs
     Offset threshold for PASS. Default 1 ms.
 
-.EXAMPLE
-    .\Test-LabTime.ps1
+.PARAMETER NtpqPath
+    Where to find ntpq.exe, for reading ntpd's own view of its peer. Defaults to
+    the location install-lab-ntp.ps1 uses. If it is missing, the ntpd peer
+    fields are left empty and the run says so in Notes rather than concluding
+    the daemon is unlocked.
 
 .EXAMPLE
-    .\Test-LabTime.ps1 -Samples 60 -Verbose
+    .\test-lab-ntp.ps1
+
+.EXAMPLE
+    .\test-lab-ntp.ps1 -Samples 60 -Verbose
 
 .EXAMPLE
     # Lab sweep, assuming WinRM is enabled on the targets
-    $r = Invoke-Command -ComputerName (Get-Content .\computers.txt) -FilePath .\Test-LabTime.ps1
+    $r = Invoke-Command -ComputerName (Get-Content .\computers.txt) -FilePath .\test-lab-ntp.ps1
     $r | Sort-Object 'Offset (ms)' | Format-Table Computer,Daemon,'Offset (ms)','Residual Drift (ppm)',Result
 #>
 [CmdletBinding()]
@@ -61,15 +78,21 @@ param(
     [ValidateRange(6, 450)][int]$Samples = 30,
     [ValidateRange(1, 60)][int]$PeriodSeconds = 8,
     [double]$ToleranceMs = 1.0,
+    [string]$NtpqPath = 'C:\NTP\bin\ntpq.exe',
     [switch]$ProgressBar,
     [switch]$Quiet
 )
 
 Set-StrictMode -Version 2.0
 
+# Issues decide PASS/FAIL. Notes record what the run could not determine, and
+# deliberately do not.
+$issues = @()
+$notes  = @()
+
 # ---------------------------------------------------------- which daemon? ----
 
-$ntpq    = 'C:\NTP\bin\ntpq.exe'
+$ntpq    = $NtpqPath
 $ntpdSvc = Get-Service ntp     -ErrorAction SilentlyContinue
 $w32Svc  = Get-Service W32Time -ErrorAction SilentlyContinue
 
@@ -81,9 +104,12 @@ $peerLine = $null; $peerOffsetMs = $null; $peerJitterMs = $null
 $reach = $null; $stratum = $null; $source = $null; $startMode = $null
 $disciplineOn = $null; $granularityPpm = $null
 
+$ntpqAvailable = $false
+
 if ($daemon -eq 'ntpd') {
     $startMode = (Get-CimInstance Win32_Service -Filter "Name='ntp'" -ErrorAction SilentlyContinue).StartMode
-    if (Test-Path $ntpq) {
+    $ntpqAvailable = Test-Path $ntpq
+    if ($ntpqAvailable) {
         # '*' marks the peer ntpd has selected as its system source.
         $peerLine = @(& $ntpq -pn 2>$null | Where-Object { $_ -match '^\*' }) | Select-Object -First 1
         if ($peerLine) {
@@ -94,6 +120,12 @@ if ($daemon -eq 'ntpd') {
             if ($cols.Count -ge 9)  { $peerOffsetMs = [double]$cols[8] }
             if ($cols.Count -ge 10) { $peerJitterMs = [double]$cols[9] }
         }
+    }
+    else {
+        # ntpd is running but its query tool is somewhere else. That says
+        # nothing about whether the clock is locked, so it must not be graded
+        # as if it did - the direct measurement below still stands on its own.
+        $notes += 'NtpdStatusUnavailable'
     }
 }
 elseif ($daemon -eq 'w32time') {
@@ -238,6 +270,9 @@ try { if ($errTask.Wait(3000)) { $errText = $errTask.Result } } catch { }
 if ($errText -and $errText.Trim()) { $collected.Add($errText.Trim()) }
 
 if ($stalled) {
+    # Also recorded on the object: in a lab sweep the warning stream is easy to
+    # lose, and a short run is the usual reason drift did not resolve.
+    $notes += 'MeasurementIncomplete'
     Write-Warning ("Measurement stopped early ($stalled). Using the $seen samples collected. " +
                    "If this repeats, the server may be rate-limiting - try a larger -PeriodSeconds.")
 }
@@ -304,9 +339,8 @@ if ($offs.Count -ge 6) {
 
 # -------------------------------------------------------------- grade ----
 
-$issues = @()
 if ($daemon -eq 'none') { $issues += 'NoTimeDaemon' }
-if ($daemon -eq 'ntpd'  -and -not $peerLine)          { $issues += 'NtpdNotLocked' }
+if ($daemon -eq 'ntpd' -and $ntpqAvailable -and -not $peerLine) { $issues += 'NtpdNotLocked' }
 if ($daemon -eq 'w32time') {
     if ($startMode -ne 'Auto')    { $issues += 'NotAutomatic' }
     if ($disciplineOn -eq $false) { $issues += 'ClockFreeRunning' }
@@ -330,7 +364,11 @@ if ($driftQuality -eq 'Good' -or $driftQuality -eq 'Marginal') {
         $issues += 'HighResidualDrift'
     }
 } else {
-    $issues += 'DriftNotResolvable'
+    # A note, not an issue. Failing here would fail a clock on a difference the
+    # measurement could not resolve, which is exactly what the 2-sigma margins
+    # above exist to prevent - a short run or a noisy path would condemn a
+    # perfectly healthy machine. Re-run with more samples to resolve it.
+    $notes += 'DriftNotResolvable'
 }
 if ($null -ne $stratum -and "$stratum" -ne '' -and [int]$stratum -gt 5) { $issues += 'StratumTooHigh' }
 
@@ -339,6 +377,7 @@ if ($null -ne $stratum -and "$stratum" -ne '' -and [int]$stratum -gt 5) { $issue
     Timestamp                  = (Get-Date)
     Result                     = if ($issues.Count -eq 0) { 'PASS' } else { 'FAIL' }
     Issues                     = ($issues -join ', ')
+    Notes                      = ($notes -join ', ')
     Daemon                     = $daemon
     'Offset (ms)'              = $offsetMs
     'Offset Uncertainty (ms)'  = $offsetUncMs
