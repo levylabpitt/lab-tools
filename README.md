@@ -18,7 +18,7 @@ problem leaves the machine on its existing source rather than with none.
 On the lab PC, open PowerShell and run:
 
 ```powershell
-iwr https://raw.githubusercontent.com/levylabpitt/lab-tools/main/ntp/install-lab-ntp.ps1 -OutFile "$env:TEMP\install-lab-ntp.ps1"; powershell -ExecutionPolicy Bypass -File "$env:TEMP\install-lab-ntp.ps1"
+iwr https://raw.githubusercontent.com/levylabpitt/lab-tools/main/lab-ntp/install-lab-ntp.ps1 -OutFile "$env:TEMP\install-lab-ntp.ps1"; powershell -ExecutionPolicy Bypass -File "$env:TEMP\install-lab-ntp.ps1"
 ```
 
 Click **Yes** on the single UAC prompt. The script prints `SUCCESS` with the
@@ -39,7 +39,7 @@ check. `test-lab-ntp.ps1` measures the clock against the server itself, and
 works whether the machine runs ntpd or w32time:
 
 ```powershell
-.\ntp\test-lab-ntp.ps1 -Samples 60
+.\lab-ntp\test-lab-ntp.ps1 -Samples 60
 ```
 
 Takes about 8 minutes; the default 30 samples takes 4 and still measures offset
@@ -58,7 +58,7 @@ well, but often will not resolve drift. Read-only, no elevation needed. Want
 
 Neither offset nor drift is failed on a difference smaller than the measurement
 can resolve, and a run that resolves nothing reports that in `Notes` rather than
-failing the machine - see [NOTES.md](ntp/NOTES.md), which explains why that
+failing the machine - see [NOTES.md](lab-ntp/NOTES.md), which explains why that
 matters more than it sounds.
 
 Quick daemon-side view any time:
@@ -73,10 +73,10 @@ The daily accuracy log lives in `C:\NTP\etc\stats\loopstats.*`.
 
 | File | Purpose |
 | --- | --- |
-| `ntp/install-lab-ntp.ps1` | One-shot Meinberg ntpd install. The normal path. |
-| `ntp/test-lab-ntp.ps1` | Independent verification. Works with ntpd or w32time. |
-| `ntp/tune-w32time.ps1` | Fallback only: tunes w32time for machines that cannot run ntpd (~1-2 ms instead of ~50 µs). |
-| `ntp/NOTES.md` | Measurements and reasoning behind the configuration. |
+| `lab-ntp/install-lab-ntp.ps1` | One-shot Meinberg ntpd install. The normal path. |
+| `lab-ntp/test-lab-ntp.ps1` | Independent verification. Works with ntpd or w32time. |
+| `lab-ntp/tune-w32time.ps1` | Fallback only: tunes w32time for machines that cannot run ntpd (~1-2 ms instead of ~50 µs). |
+| `lab-ntp/NOTES.md` | Measurements and reasoning behind the configuration. |
 
 ## Why not just use Windows' built-in w32time?
 

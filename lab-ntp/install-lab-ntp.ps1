@@ -13,7 +13,7 @@
 #   4. Waits until the clock is actually locked and reports the measured offset.
 #
 # Usage (any lab PC, ordinary PowerShell window):
-#   iwr https://raw.githubusercontent.com/levylabpitt/lab-tools/main/ntp/install-lab-ntp.ps1 -OutFile "$env:TEMP\install-lab-ntp.ps1"
+#   iwr https://raw.githubusercontent.com/levylabpitt/lab-tools/main/lab-ntp/install-lab-ntp.ps1 -OutFile "$env:TEMP\install-lab-ntp.ps1"
 #   powershell -ExecutionPolicy Bypass -File "$env:TEMP\install-lab-ntp.ps1"
 # or right-click -> "Run with PowerShell" (it self-elevates).
 #
