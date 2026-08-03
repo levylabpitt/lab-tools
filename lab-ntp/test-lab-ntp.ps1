@@ -356,18 +356,20 @@ if ($null -eq $offsetMs) {
     if (([math]::Abs($offsetMs) - $margin) -gt $ToleranceMs) { $issues += 'OffsetOutOfTolerance' }
 }
 
-if ($driftQuality -eq 'Good' -or $driftQuality -eq 'Marginal') {
-    # Same 2-sigma margin as the offset check. Without it a drift of
-    # -8 +/- 4.9 ppm fails, even though that range comfortably includes zero.
+# Always applied. The 2-sigma margin already absorbs an imprecise run: a noisy
+# -8 +/- 4.9 ppm cannot clear it, because that range includes zero. Gating this
+# on Drift Quality as well conflated how *precisely* the slope was measured with
+# how *large* it is, and swallowed a real 51.34 +/- 5.69 ppm - nine sigma from
+# zero, on a machine that had never once been disciplined - purely because the
+# uncertainty exceeded 5 ppm.
+if ($null -ne $driftPpm) {
     $driftMargin = if ($driftUncPpm) { 2 * $driftUncPpm } else { 0 }
-    if ($null -ne $driftPpm -and ([math]::Abs($driftPpm) - $driftMargin) -gt 5) {
-        $issues += 'HighResidualDrift'
-    }
-} else {
-    # A note, not an issue. Failing here would fail a clock on a difference the
-    # measurement could not resolve, which is exactly what the 2-sigma margins
-    # above exist to prevent - a short run or a noisy path would condemn a
-    # perfectly healthy machine. Re-run with more samples to resolve it.
+    if (([math]::Abs($driftPpm) - $driftMargin) -gt 5) { $issues += 'HighResidualDrift' }
+}
+
+# Informational: how well this run resolved the slope, never a verdict on the
+# clock. Failing on it would condemn a healthy machine for a short or noisy run.
+if ($driftQuality -ne 'Good' -and $driftQuality -ne 'Marginal') {
     $notes += 'DriftNotResolvable'
 }
 if ($null -ne $stratum -and "$stratum" -ne '' -and [int]$stratum -gt 5) { $issues += 'StratumTooHigh' }

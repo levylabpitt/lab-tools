@@ -233,12 +233,22 @@ filegen loopstats file loopstats type day enable
 tinker panic 0
 
 # Serve nothing, answer nothing, allow no modification.
-# noserve: do not hand out time to other machines - the lab has a dedicated
-# appliance for that, and no workstation should be acting as a time source.
-# noquery: no remote ntpq/ntpdc, which is also what blocks amplification abuse.
-restrict default kod nomodify notrap nopeer noquery noserve
+#
+# restrict applies to INCOMING packets, and the time server's reply to our own
+# request is an incoming packet. So the server needs its own line here. Without
+# one, a restrictive default silently discards every reply and ntpd sits at
+# .INIT. with reach 0 forever, never touching the clock, while the service looks
+# perfectly healthy. That is not hypothetical - it shipped, and cost a machine
+# 7.75 s of drift over one weekend. See NOTES.md.
+#
+# "ignore" drops everything not listed below. A host-specific line replaces the
+# default's flags rather than adding to them, so the three below are the entire
+# allow-list: the lab appliance, and loopback so local ntpq keeps working (both
+# this script and test-lab-ntp.ps1 depend on that).
+restrict default ignore
 restrict 127.0.0.1
 restrict ::1
+restrict $ip nomodify notrap noquery
 "@ | Set-Content $conf -Encoding ascii
 
     # --- write silent-install settings ---
@@ -276,7 +286,19 @@ UseConfigFile=$conf
     # --- run the installer silently ---
     Write-Host 'Installing Meinberg NTP (silent)...'
     $p = Start-Process $exe -ArgumentList "/USE_FILE=$ini" -Wait -PassThru
-    if ($p.ExitCode -ne 0) { Fail 5 "Installer exited with code $($p.ExitCode); see $work\meinberg-install.log" }
+    $installerExit = $p.ExitCode
+
+    # Advisory, not fatal. The Meinberg silent installer returns 2 on runs whose
+    # own log ends "++ Installation successfully completed", that restart the
+    # service and produce a locked daemon - observed repeatedly on Windows 11.
+    # Failing here aborted before the acceptance test below, which is the only
+    # thing that actually knows whether this machine is keeping time. Trusting
+    # an installer's self-report over the observable outcome is the same mistake
+    # test-lab-ntp.ps1 exists to avoid.
+    if ($installerExit -ne 0) {
+        Write-Host "Note: installer returned exit code $installerExit."
+        Write-Host "  Its log is $work\meinberg-install.log; the acceptance test below decides."
+    }
 
     # --- acceptance test: service up, peer reachable, clock converging ---
     Write-Host 'Waiting for the ntp service...'
@@ -291,7 +313,8 @@ UseConfigFile=$conf
         # The installer has already run, and it disables w32time. With ntpd not
         # running either, this machine now has no time source at all - say so
         # plainly rather than leaving that to be discovered later.
-        Fail 5 ("ntp service did not start; see $work\meinberg-install.log`n" +
+        Fail 5 ("ntp service did not start (installer exit code $installerExit);`n" +
+                "  see $work\meinberg-install.log`n" +
                 "  THIS MACHINE NOW HAS NO TIME SOURCE: the installer disabled w32time.`n" +
                 "  Recover with either:`n" +
                 "    sc.exe start ntp`n" +

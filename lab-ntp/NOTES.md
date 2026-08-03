@@ -34,9 +34,31 @@ The applied correction crept 35.5 → 35.7 ppm over 18 hours. That is temperatur
 
 The same principle governs a run that resolves nothing at all. A window too short to separate drift from network jitter is a fact about the measurement, not about the clock, so `Drift Quality` of `Poor` or `Insufficient` lands in `Notes` and leaves `Result` alone. Only `Issues` decides PASS/FAIL. An earlier version failed on it, which meant a noisy path or a short run condemned a healthy machine - the identical error the two-sigma margins were added to prevent, arriving through a different door.
 
+The correction has to stop there, though. `Drift Quality` is informational, but the drift *magnitude* test still runs on every sample set, because the two-sigma margin already handles an imprecise run by absorbing it. A first attempt at the fix gated the magnitude check behind the quality label, which conflates how precisely the slope was measured with how large it is. That swallowed a genuine 51.34 ± 5.69 ppm on the machine described below - nine sigma from zero, a clock that had never been disciplined at all - purely because the uncertainty exceeded 5 ppm. Precision and magnitude are separate questions and need separate tests.
+
 This matters in both directions. An early version failed a healthy machine on an offset of 1.21 ms against a 1.00 ms threshold while its own sample spread was 7.2 ms - crying wolf on 0.2 ms it could not actually see.
 
 For drift precision, window length beats sample count: 60 samples at 8 s resolves the slope about as well as 150 samples at 2 s, using 60% fewer packets.
+
+## restrict applies to the server's replies
+
+The first machine deployed with `install-lab-ntp.ps1` never synchronised once, over three days, while looking completely healthy: service running, start mode Automatic, correct IP in `ntp.conf`, and the appliance answering raw NTP probes from that same machine on demand. `ntpq -pn` showed the tell:
+
+```
+ 10.226.177.233  .INIT.   16 u    -   64    0    0.000   +0.000   0.000
+```
+
+`.INIT.` with `reach 0` means ntpd had never processed a single reply. The cause was the generated config:
+
+```
+restrict default kod nomodify notrap nopeer noquery noserve
+```
+
+**`restrict` filters incoming packets, and a server's reply to our own request is an incoming packet.** With no line permitting the upstream, every answer was discarded before ntpd looked at it. Adding one line fixed it instantly - `reach` climbed and ntpd stepped the clock from 7752.9 ms to 1.271 ms.
+
+The clock had free-run the whole time at 51.34 ppm. That is the arithmetic that identified it: 7.7529 s at 51.34 ppm is 1.75 days, matching install to discovery exactly. A residual drift near the machine's *free-running* figure means nothing is disciplining the clock, whatever the service status says.
+
+Two lessons worth keeping. Hardening templates that use a restrictive default always whitelist their upstream servers, and the widely copied `restrict default kod nomodify notrap nopeer noquery` omits `noserve` for this reason. And a time daemon reports itself healthy while doing nothing at all, which is the entire argument for `test-lab-ntp.ps1` measuring against the reference independently rather than asking the daemon how it is doing.
 
 ## Poll the server gently
 
