@@ -60,6 +60,29 @@ The clock had free-run the whole time at 51.34 ppm. That is the arithmetic that 
 
 Two lessons worth keeping. Hardening templates that use a restrictive default always whitelist their upstream servers, and the widely copied `restrict default kod nomodify notrap nopeer noquery` omits `noserve` for this reason. And a time daemon reports itself healthy while doing nothing at all, which is the entire argument for `test-lab-ntp.ps1` measuring against the reference independently rather than asking the daemon how it is doing.
 
+## First convergence takes hours, and gets worse before it gets better
+
+Measured from `loopstats` on the first machine to sync correctly, from a cold start with no driftfile:
+
+| Elapsed | Offset | Drift correction applied |
+| --- | --- | --- |
+| 5 min | 4.05 ms | 0.00 ppm |
+| 10 min | -7.22 ms | 0.00 ppm |
+| 20 min | 10.73 ms | 4.34 ppm |
+| **30 min** | **16.19 ms** | 6.59 ppm |
+| 45 min | 8.09 ms | 1.06 ppm |
+| 60 min | 9.20 ms | 9.72 ppm |
+| 90 min | 5.05 ms | 21.06 ppm |
+| 120 min | 3.06 ms | 27.98 ppm |
+| 150 min | 1.37 ms | 31.67 ppm |
+| 175 min | 0.90 ms | 33.13 ppm |
+
+**The offset peaks around 30 minutes, roughly four times worse than it started.** That is not a fault. ntpd begins with a frequency correction of zero, so while it is still learning, the clock keeps running away at its full 51 ppm and ntpd is chasing a moving target. Only once the applied correction approaches the true error does the offset collapse. Anyone who checks at the half-hour mark and sees a growing offset is looking at normal behaviour at its worst moment.
+
+Crossing inside 1 ms took about 3 hours, and the correction was still climbing toward the machine's measured 51.34 ppm when it got there. The old claim of "~30 min to converge" was wrong for a first install; it is about right for a *restart*, because the driftfile supplies the frequency and only the phase has to settle.
+
+This is what makes `Result: IMPROVING` worth having. A first-day machine is genuinely out of tolerance and genuinely fine, and those two facts need to be reportable at the same time.
+
 ## Poll the server gently
 
 Sampling every 2 s can trip an NTP server's rate limiting. Symptoms are dropped samples (runs returning 141 of 150) and occasionally a stalled `w32tm /stripchart` that never returns. Default `-PeriodSeconds` is 8 for that reason, and every wait in the script is bounded so a stalled server can never hang the run.

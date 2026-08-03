@@ -31,8 +31,11 @@
 #
 # The Meinberg installer exe is used from beside this script if present;
 # otherwise it is downloaded from meinbergglobal.com. Either way its SHA-256 is
-# verified before running. Expect ~20-60 us offset on a wired LAN once settled;
-# the transient after install can take ~30 min to fully converge.
+# verified before running. Expect ~20-60 us offset on a wired LAN once settled.
+# A FIRST install converges in hours, not minutes: with no driftfile yet, ntpd
+# has to learn the crystal's frequency error from zero, and a machine 51 ppm out
+# took ~3 h to come inside 1 ms. Later restarts resume from the driftfile and
+# settle in ~30 min. A large offset on day one is normal - see NOTES.md.
 #
 # Note: the install enables the Windows multimedia timer (EnableMMTimer). That
 # raises the SYSTEM-WIDE timer resolution, not just ntpd's. It is what makes the
@@ -342,7 +345,10 @@ UseConfigFile=$conf
         $offset = if ($cols.Count -ge 9) { $cols[8] } else { 'unknown' }
         $jitter = if ($cols.Count -ge 10) { $cols[9] } else { 'unknown' }
         Write-Host "SUCCESS: locked to $NtpServer, current offset $offset ms (jitter $jitter ms)."
-        Write-Host 'Full convergence to the tens-of-microseconds floor takes ~30 min.'
+        Write-Host 'Locking is not converging. On a FIRST install ntpd must learn this'
+        Write-Host 'clock frequency from scratch, which takes hours - a machine 51 ppm out'
+        Write-Host 'took ~3 h to come inside 1 ms. Later restarts resume from the driftfile'
+        Write-Host 'and settle in ~30 min. An offset of milliseconds today is expected.'
         Write-Host 'Check anytime with: C:\NTP\bin\ntpq -p   (accuracy log: C:\NTP\etc\stats\loopstats.*)'
         Write-Host 'Independent check:  .\test-lab-ntp.ps1'
     } else {

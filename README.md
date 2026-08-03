@@ -22,8 +22,15 @@ iwr https://raw.githubusercontent.com/levylabpitt/lab-tools/main/lab-ntp/install
 ```
 
 Click **Yes** on the single UAC prompt. The script prints `SUCCESS` with the
-measured clock offset once locked. Expect roughly 20-60 microseconds after ~30
-minutes of settling.
+measured clock offset once locked. Expect roughly 20-60 microseconds once
+settled.
+
+**On a first install, settling takes hours, not minutes.** With no driftfile
+yet, ntpd has to learn the crystal's frequency error from zero; a machine 51 ppm
+out took about 3 hours to come inside 1 ms. Restarts after that resume from the
+driftfile and settle in ~30 minutes. A millisecond-scale offset on day one is
+normal, and `test-lab-ntp.ps1` reports it as `IMPROVING` rather than `FAIL` while
+it is still closing.
 
 Point it somewhere else with `-NtpServer <host|ip>` if you need to.
 
@@ -48,13 +55,30 @@ well, but often will not resolve drift. Read-only, no elevation needed. Want
 
 | Field | Meaning |
 | --- | --- |
-| `Result` | PASS or FAIL, decided by `Issues` alone |
-| `Issues` | Real problems. Any entry means FAIL. |
+| `Result` | `PASS`, `IMPROVING`, or `FAIL` |
+| `Issues` | Real problems. Any entry means not-PASS. |
 | `Notes` | What the run could not determine. Never affects `Result`. |
 | `Offset (ms)` | Distance from the reference, with its own uncertainty |
 | `Residual Drift (ppm)` | How fast the clock is still gaining or losing. Near zero is the goal. |
 | `Drift Quality` | Whether the run was long enough to resolve drift at all |
+| `Offset Trend (ms/h)` | Which way the offset is moving, from hours of history. Negative is closing. |
+| `ETA to Tolerance (h)` | At the current rate, when it comes inside `-ToleranceMs` |
 | `Source Matches Ref` | Catches a machine that was missed during deployment |
+
+`IMPROVING` means the offset is the only thing wrong and it is measurably
+closing with an end in sight. It reads ntpd's own `loopstats`, which holds one
+line per clock update going back to install, so it can see a trend no single run
+could. The verdict itself still rests on the independent measurement; the
+history only answers "which direction, and how fast". Machines on w32time have
+no loopstats, so runs are also appended to
+`C:\ProgramData\LevyLab\lab-sync-history.csv` as a fallback (best-effort, still
+no elevation needed; `-NoHistory` disables it).
+
+The gate is deliberately narrow. Anything unlocked, on the wrong source, or
+drifting badly is `FAIL` regardless of which way its offset is moving, and so is
+anything still hours away from tolerance - that is stuck, not converging.
+
+**For lab sweeps, test `Result -ne 'PASS'` rather than `-eq 'FAIL'`.**
 
 Neither offset nor drift is failed on a difference smaller than the measurement
 can resolve, and a run that resolves nothing reports that in `Notes` rather than

@@ -61,6 +61,25 @@
     fields are left empty and the run says so in Notes rather than concluding
     the daemon is unlocked.
 
+.PARAMETER StatsDir
+    Where ntpd writes loopstats. Used to tell a machine that is still converging
+    from one that is simply wrong: loopstats records every clock update, so it
+    holds hours of offset history that a single run cannot see.
+
+.PARAMETER HistoryPath
+    CSV appended with one row per run, so w32time machines and machines without
+    loopstats still accumulate a trend. Written best-effort - if the path is not
+    writable the run is unaffected and says so in Notes, keeping this script
+    free of any elevation requirement.
+
+.PARAMETER NoHistory
+    Do not append to the history CSV. The run is otherwise identical.
+
+.PARAMETER TrendWindowMinutes
+    How far back to look when deciding whether the offset is closing. Default
+    120. A first install takes about 3 hours to come inside 1 ms, so the window
+    has to be long enough to see through the noise of a single poll.
+
 .EXAMPLE
     .\test-lab-ntp.ps1
 
@@ -79,6 +98,10 @@ param(
     [ValidateRange(1, 60)][int]$PeriodSeconds = 8,
     [double]$ToleranceMs = 1.0,
     [string]$NtpqPath = 'C:\NTP\bin\ntpq.exe',
+    [string]$StatsDir = 'C:\NTP\etc\stats',
+    [string]$HistoryPath = (Join-Path $env:ProgramData 'LevyLab\lab-sync-history.csv'),
+    [ValidateRange(10, 1440)][int]$TrendWindowMinutes = 120,
+    [switch]$NoHistory,
     [switch]$ProgressBar,
     [switch]$Quiet
 )
@@ -337,6 +360,114 @@ if ($offs.Count -ge 6) {
     }
 }
 
+# -------------------------------------------------- offset trend ----
+# A machine on its first install is genuinely out of tolerance and genuinely
+# fine. Telling those apart needs history, which a single run does not have.
+#
+# ntpd already keeps that history in loopstats - one line per clock update,
+# going back to install - so this reads it rather than inventing a second log.
+# The verdict still rests on the independent measurement above; loopstats only
+# answers "which direction, and how fast". A CSV of past runs is the fallback
+# for w32time machines, which have no equivalent.
+
+# Least-squares slope of y against x, with the standard error of that slope.
+function Get-Slope {
+    param([double[]]$X, [double[]]$Y)
+    $n = $X.Count
+    if ($n -lt 4) { return $null }
+    $mx = ($X | Measure-Object -Average).Average
+    $my = ($Y | Measure-Object -Average).Average
+    $num = 0.0; $den = 0.0
+    for ($k = 0; $k -lt $n; $k++) {
+        $num += ($X[$k] - $mx) * ($Y[$k] - $my)
+        $den += ($X[$k] - $mx) * ($X[$k] - $mx)
+    }
+    if ($den -le 0) { return $null }
+    $slope = $num / $den
+    $b0 = $my - $slope * $mx
+    $sse = 0.0
+    for ($k = 0; $k -lt $n; $k++) { $r = $Y[$k] - ($b0 + $slope * $X[$k]); $sse += $r * $r }
+    $se = [math]::Sqrt($sse / [math]::Max(1, $n - 2)) / [math]::Sqrt($den)
+    [pscustomobject]@{ Slope = $slope; StdErr = $se; Points = $n }
+}
+
+$trendPerHour = $null; $trendUncPerHour = $null; $trendSource = $null
+$trendPoints = $null; $trendSpanMin = $null; $etaHours = $null; $improving = $false
+
+$tx = @(); $ty = @()      # hours ago (negative), |offset| in ms
+
+# loopstats: "MJD secondsUTC offset_s drift_ppm ...". MJD*86400 + seconds gives
+# an absolute timeline, so this spans midnight and multiple files cleanly.
+if (Test-Path $StatsDir) {
+    $files = @(Get-ChildItem $StatsDir -Filter 'loopstats*' -ErrorAction SilentlyContinue |
+               Sort-Object Name | Select-Object -Last 3)
+    $rows = @()
+    foreach ($f in $files) {
+        foreach ($line in (Get-Content $f.FullName -ErrorAction SilentlyContinue)) {
+            $c = $line -split '\s+'
+            if ($c.Count -ge 3) {
+                $mjd = 0.0; $sec = 0.0; $off = 0.0
+                if ([double]::TryParse($c[0], [ref]$mjd) -and
+                    [double]::TryParse($c[1], [ref]$sec) -and
+                    [double]::TryParse($c[2], [ref]$off)) {
+                    $rows += [pscustomobject]@{ T = $mjd * 86400 + $sec; Off = [math]::Abs($off) * 1000 }
+                }
+            }
+        }
+    }
+    if ($rows.Count -ge 4) {
+        $tEnd = ($rows | Measure-Object -Property T -Maximum).Maximum
+        $keep = @($rows | Where-Object { ($tEnd - $_.T) -le ($TrendWindowMinutes * 60) })
+        if ($keep.Count -ge 4) {
+            foreach ($r in $keep) { $tx += (($r.T - $tEnd) / 3600.0); $ty += $r.Off }
+            $trendSource  = 'loopstats'
+            $trendSpanMin = [math]::Round((($keep | Measure-Object -Property T -Maximum).Maximum -
+                                           ($keep | Measure-Object -Property T -Minimum).Minimum) / 60, 1)
+        }
+    }
+}
+
+# Fallback: our own per-run history, for machines with no loopstats.
+if (-not $trendSource -and (Test-Path $HistoryPath)) {
+    try {
+        $hist = @(Import-Csv $HistoryPath -ErrorAction Stop |
+                  Where-Object { $_.Computer -eq $env:COMPUTERNAME -and $_.OffsetMs })
+        $now = Get-Date
+        $keep = @($hist | ForEach-Object {
+            $ts = [datetime]::MinValue
+            if ([datetime]::TryParse($_.Timestamp, [ref]$ts)) {
+                $ageH = ($now - $ts).TotalHours
+                if ($ageH -le ($TrendWindowMinutes / 60.0) -and $ageH -ge 0) {
+                    [pscustomobject]@{ H = -$ageH; Off = [math]::Abs([double]$_.OffsetMs) }
+                }
+            }
+        } | Where-Object { $_ })
+        if ($keep.Count -ge 4) {
+            foreach ($r in ($keep | Sort-Object H)) { $tx += $r.H; $ty += $r.Off }
+            $trendSource  = 'run history'
+            $trendSpanMin = [math]::Round((($keep | Measure-Object -Property H -Maximum).Maximum -
+                                           ($keep | Measure-Object -Property H -Minimum).Minimum) * 60, 1)
+        }
+    } catch { }
+}
+
+if ($trendSource) {
+    $fit = Get-Slope -X $tx -Y $ty
+    if ($fit) {
+        $trendPerHour    = [math]::Round($fit.Slope, 4)
+        $trendUncPerHour = [math]::Round($fit.StdErr, 4)
+        $trendPoints     = $fit.Points
+        # Same 2-sigma rule as everywhere else: the offset is closing only if the
+        # slope is negative by more than the fit's own uncertainty.
+        $improving = (($fit.Slope + 2 * $fit.StdErr) -lt 0)
+        if ($improving -and $null -ne $offsetMs) {
+            $excess = [math]::Abs($offsetMs) - $ToleranceMs
+            if ($excess -gt 0) { $etaHours = [math]::Round($excess / [math]::Abs($fit.Slope), 2) }
+            else               { $etaHours = 0 }
+        }
+    }
+}
+
 # -------------------------------------------------------------- grade ----
 
 if ($daemon -eq 'none') { $issues += 'NoTimeDaemon' }
@@ -374,10 +505,45 @@ if ($driftQuality -ne 'Good' -and $driftQuality -ne 'Marginal') {
 }
 if ($null -ne $stratum -and "$stratum" -ne '' -and [int]$stratum -gt 5) { $issues += 'StratumTooHigh' }
 
+# PASS / IMPROVING / FAIL.
+#
+# IMPROVING is deliberately narrow: the offset must be the ONLY thing wrong, the
+# daemon otherwise healthy, the offset measurably closing, and an end in sight.
+# A machine that is unlocked, on the wrong source, or drifting badly is broken
+# no matter which way its offset happens to be moving, and a machine that has
+# been "improving" for a day is not converging, it is stuck.
+#
+# Note for sweeps: -ne 'PASS' is the test for "needs attention", not -eq 'FAIL'.
+$result = if ($issues.Count -eq 0) { 'PASS' } else { 'FAIL' }
+if ($result -eq 'FAIL' -and
+    $issues.Count -eq 1 -and $issues[0] -eq 'OffsetOutOfTolerance' -and
+    $improving -and $null -ne $etaHours -and $etaHours -le 12) {
+    $result = 'IMPROVING'
+}
+
+# Best-effort history, so w32time machines accumulate a trend too. Never allowed
+# to affect the run: this script promises to need no elevation and change
+# nothing that matters, and an unwritable path must stay a note, not an error.
+if (-not $NoHistory -and $null -ne $offsetMs) {
+    try {
+        $dir = Split-Path $HistoryPath -Parent
+        if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir -ErrorAction Stop | Out-Null }
+        if (-not (Test-Path $HistoryPath)) {
+            'Timestamp,Computer,Daemon,OffsetMs,OffsetUncMs,DriftPpm,Result' |
+                Set-Content $HistoryPath -Encoding ascii -ErrorAction Stop
+        }
+        ('{0},{1},{2},{3},{4},{5},{6}' -f (Get-Date -Format s), $env:COMPUTERNAME, $daemon,
+            $offsetMs, $offsetUncMs, $driftPpm, $result) |
+            Add-Content $HistoryPath -Encoding ascii -ErrorAction Stop
+    } catch {
+        $notes += 'HistoryNotWritten'
+    }
+}
+
 [pscustomobject]@{
     Computer                   = $env:COMPUTERNAME
     Timestamp                  = (Get-Date)
-    Result                     = if ($issues.Count -eq 0) { 'PASS' } else { 'FAIL' }
+    Result                     = $result
     Issues                     = ($issues -join ', ')
     Notes                      = ($notes -join ', ')
     Daemon                     = $daemon
@@ -386,6 +552,12 @@ if ($null -ne $stratum -and "$stratum" -ne '' -and [int]$stratum -gt 5) { $issue
     'Residual Drift (ppm)'     = $driftPpm
     'Drift Uncertainty (ppm)'  = $driftUncPpm
     'Drift Quality'            = $driftQuality
+    'Offset Trend (ms/h)'      = $trendPerHour
+    'Trend Uncertainty (ms/h)' = $trendUncPerHour
+    'Trend Source'             = $trendSource
+    'Trend Span (min)'         = $trendSpanMin
+    'Trend Points'             = $trendPoints
+    'ETA to Tolerance (h)'     = $etaHours
     Source                     = $source
     'Source Matches Ref'       = $sourceMatches
     Stratum                    = $stratum
