@@ -43,15 +43,28 @@ locked, `8` wrong script for this machine). Both scripts use the same table.
 
 `ntpq -p` reports ntpd's estimate of its *own* error, which is not an independent
 check. `test-lab-ntp.ps1` measures the clock against the server itself, and
-works whether the machine runs ntpd or w32time:
+works whether the machine runs ntpd or w32time.
+
+On any lab PC, with no clone of this repo needed:
+
+```powershell
+iwr https://raw.githubusercontent.com/levylabpitt/lab-tools/main/lab-ntp/test-lab-ntp.ps1 -OutFile "$env:TEMP\test-lab-ntp.ps1"; powershell -ExecutionPolicy Bypass -File "$env:TEMP\test-lab-ntp.ps1" -Samples 60
+```
+
+Ordinary PowerShell window, no UAC prompt: this one is read-only and needs no
+elevation. From a clone, it is simply:
 
 ```powershell
 .\lab-ntp\test-lab-ntp.ps1 -Samples 60
 ```
 
 Takes about 8 minutes; the default 30 samples takes 4 and still measures offset
-well, but often will not resolve drift. Read-only, no elevation needed. Want
-`Result: PASS`.
+well, but often will not resolve drift. Want `Result: PASS`.
+
+`iwr` on its own only fetches the file into memory - it neither saves nor runs
+anything. The `-OutFile` and the second command are both load-bearing, and
+`-ExecutionPolicy Bypass` keeps a machine's policy from refusing a downloaded
+script.
 
 | Field | Meaning |
 | --- | --- |
